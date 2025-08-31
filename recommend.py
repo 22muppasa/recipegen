@@ -1,84 +1,156 @@
-
+# recommend_recipes.py
+import os
+import ast
+import numpy as np
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-import ast
+from joblib import dump, load
 
-# --- Google Colab Setup (Instructions for User) ---
-# 1. Upload 'processed_recipes.csv' to your Colab environment.
-#    You can do this by clicking the folder icon on the left sidebar -> 'Files' -> 'Upload to session storage'.
-#    Make sure the file is in the root directory or adjust the path below.
+# ---------- Paths ----------
+CSV_ING_PATH   = "processed_recipes.csv"  # from preprocess step
+CSV_LOOKUP_PATH= "recipes_lookup.csv"     # from preprocess step
+VEC_PATH       = "tfidf_vectorizer.joblib"
+MATRIX_PATH    = "tfidf_matrix.joblib"
+DF_PATH        = "recipes_df.joblib"
 
-# Load processed data (using a subset for faster execution in Colab)
-# For full dataset, remove .head(50000)
-df = pd.read_csv('processed_recipes.csv').head(50000) # Using a subset
+# ---------- Load data (ingredients) ----------
+usecols = ["RecipeId","Name","CleanedIngredients"]
+df = pd.read_csv(CSV_ING_PATH, usecols=usecols)
 
+def safe_list_eval(s):
+    try:
+        v = ast.literal_eval(s)
+        return v if isinstance(v, list) else []
+    except Exception:
+        return []
 
-# Convert string representation of list to actual list
-df['CleanedIngredients'] = df['CleanedIngredients'].apply(ast.literal_eval)
+df["CleanedIngredients"] = df["CleanedIngredients"].apply(safe_list_eval)
+df["IngredientsString"] = df["CleanedIngredients"].apply(lambda x: " ".join(x))
 
-# Combine cleaned ingredients into a single string for TF-IDF
-df['IngredientsString'] = df['CleanedIngredients'].apply(lambda x: ' '.join(x))
+# ---------- Load lookup table for instructions/metadata ----------
+df_lookup = pd.read_csv(CSV_LOOKUP_PATH)
 
-# Initialize TF-IDF Vectorizer
-tfidf_vectorizer = TfidfVectorizer()
+# Map RecipeId -> row (for O(1) retrieval)
+lookup_by_id = {row["RecipeId"]: row for _, row in df_lookup.iterrows()}
 
-# Fit and transform the ingredient strings
-tfidf_matrix = tfidf_vectorizer.fit_transform(df['IngredientsString'])
-
-# Calculate cosine similarity matrix
-# Note: For a larger dataset, this matrix can be very large and consume a lot of memory.
-# For production, consider on-the-fly similarity calculation or approximate nearest neighbors.
-cosine_sim = cosine_similarity(tfidf_matrix, tfidf_matrix)
-
-print("TF-IDF Vectorization and Cosine Similarity calculation complete.")
-
-# --- Recommendation Function ---
-def get_recommendations(ingredients_list, df_recipes, tfidf_vec, cosine_sim_matrix, top_n=5):
-    # Clean and combine input ingredients
-    cleaned_input_ingredients = [ing.strip().lower() for ing in ingredients_list]
-    input_string = ' '.join(cleaned_input_ingredients)
-
-    # Transform input ingredients using the trained TF-IDF vectorizer
-    input_tfidf = tfidf_vec.transform([input_string])
-
-    # Calculate similarity between input and all recipes
-    input_sim_scores = cosine_similarity(input_tfidf, tfidf_vec.transform(df_recipes['IngredientsString']))[0]
-
-    # Get top N similar recipes
-    # Sort by similarity score in descending order
-    # Get the indices of the top N recipes
-    top_recipe_indices = input_sim_scores.argsort()[-top_n:][::-1]
-
-    # Get the actual recipe names and their similarity scores
-    recommendations = []
-    for idx in top_recipe_indices:
-        recommendations.append({
-            'RecipeId': df_recipes.iloc[idx]['RecipeId'],
-            'Name': df_recipes.iloc[idx]['Name'],
-            'SimilarityScore': input_sim_scores[idx]
-        })
-    return recommendations
-
-# --- Example Usage (for Colab) ---
-if __name__ == '__main__':
-    print("\n--- Example Usage ---")
-    user_ingredients = ['chicken', 'broccoli', 'garlic', 'soy sauce']
-    print(f"User Ingredients: {user_ingredients}")
-
-    recommended_recipes = get_recommendations(
-        user_ingredients,
-        df,
-        tfidf_vectorizer,
-        cosine_sim,
-        top_n=5
+# ---------- Vectorizer + Matrix (cache if available) ----------
+if os.path.exists(VEC_PATH) and os.path.exists(MATRIX_PATH) and os.path.exists(DF_PATH):
+    tfidf_vectorizer = load(VEC_PATH)
+    tfidf_matrix     = load(MATRIX_PATH)
+    df               = load(DF_PATH)
+else:
+    tfidf_vectorizer = TfidfVectorizer(
+        preprocessor=None,
+        tokenizer=str.split,
+        lowercase=False,
+        dtype=np.float32,
+        min_df=2,
+        max_features=50000,
+        ngram_range=(1, 1)
     )
+    tfidf_matrix = tfidf_vectorizer.fit_transform(df["IngredientsString"])
+    dump(tfidf_vectorizer, VEC_PATH)
+    dump(tfidf_matrix, MATRIX_PATH)
+    dump(df, DF_PATH)
 
-    print("\nRecommended Recipes:")
-    for recipe in recommended_recipes:
-        print(f"- {recipe['Name']} (Score: {recipe['SimilarityScore']:.2f})")
+def get_recommendations(ingredients_list, top_n=4):
+    """
+    Returns list of top_n dicts with keys:
+      RecipeId, Name, SimilarityScore
+    """
+    cleaned = [str(ing).strip().lower() for ing in ingredients_list if str(ing).strip()]
+    if not cleaned:
+        return []
 
-    print("\n--- End of Example ---")
+    q = " ".join(cleaned)
+    q_vec = tfidf_vectorizer.transform([q])          # 1 x V
+    scores = (tfidf_matrix @ q_vec.T).toarray().ravel()  # (N,)
 
+    if top_n >= len(scores):
+        top_idx = np.argsort(scores)[::-1]
+    else:
+        part = np.argpartition(scores, -top_n)[-top_n:]
+        top_idx = part[np.argsort(scores[part])[::-1]]
 
+    out = []
+    for idx in top_idx:
+        out.append({
+            "RecipeId": df.iloc[idx]["RecipeId"],
+            "Name": df.iloc[idx]["Name"],
+            "SimilarityScore": float(scores[idx])
+        })
+    return out
 
+def present_choices(recs):
+    """
+    Prints A/B/C/D style list. Returns the same list, but
+    each item enriched with 'choice' = 'A'|'B'|'C'|'D'.
+    """
+    labels = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    enriched = []
+    print("\nWhich recipe do you want? Choose A, B, C, or D.\n")
+    for i, r in enumerate(recs):
+        tag = labels[i]
+        enriched.append({**r, "choice": tag})
+        print(f"{tag}) {r['Name']}  (ID: {r['RecipeId']}, score: {r['SimilarityScore']:.3f})")
+    return enriched
+
+def show_recipe_for_choice(choice_letter, choice_list):
+    """
+    Given a letter like 'A'/'B'/'C'/'D' and the choice list from present_choices,
+    fetch the full recipe (instructions + metadata) from recipes_lookup.csv and print it.
+    """
+    if not choice_list:
+        print("No recommendations to choose from.")
+        return
+
+    choice_letter = str(choice_letter).strip().upper()
+    pick = next((x for x in choice_list if x["choice"] == choice_letter), None)
+    if not pick:
+        print(f"Invalid choice '{choice_letter}'.")
+        return
+
+    rid = pick["RecipeId"]
+    info = lookup_by_id.get(rid)
+    if info is None:
+        print(f"Recipe details not found for RecipeId={rid}.")
+        return
+
+    # Pretty print
+    def safe(v): 
+        return "" if (pd.isna(v) if hasattr(pd, "isna") else v is None) else v
+
+    print("\n" + "="*60)
+    print(f"{safe(info['Name'])}  (RecipeId: {rid})")
+    url = info.get("RecipeUrl") if isinstance(info, dict) else info["RecipeUrl"]
+    if isinstance(url, float):  # NaN
+        url = ""
+    if url:
+        print(f"URL: {url}")
+    print("-"*60)
+    print(f"Description: {safe(info['Description'])}")
+    print(f"Category: {safe(info['RecipeCategory'])} | Cuisine: {safe(info['RecipeCuisine'])}")
+    print(f"Servings: {safe(info['RecipeServings'])}")
+    print(f"Total: {safe(info['TotalTime'])[2:]} | Prep: {safe(info['PrepTime'])[2:]} | Cook: {safe(info['CookTime'])[2:]}")
+    print(f"Nutrition (per recipe or serving as provided): "
+          f"Calories={safe(info['Calories'])}, Protein={safe(info['ProteinContent'])}, "
+          f"Fat={safe(info['FatContent'])}, Carbs={safe(info['CarbohydrateContent'])}")
+    kw = safe(info['Keywords'])
+    if kw:
+        print(f"Keywords: {kw}")
+    print("-"*60)
+    instr = safe(info['Instructions'])
+    print("Instructions:")
+    print(instr if instr else "(No instructions provided)")
+    print("="*60 + "\n")
+
+# ---------- Example ----------
+if __name__ == "__main__":
+    user_ingredients = ["beef", "chicken", "onion", "broccoli"]
+    recs = get_recommendations(user_ingredients, top_n=4)
+    choices = present_choices(recs)
+
+    # Example: pretend the user typed 'B'
+    user_choice = "A"
+    print(f"\nYou selected: {user_choice}\n")
+    show_recipe_for_choice(user_choice, choices)
