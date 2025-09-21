@@ -1,0 +1,105 @@
+🧱 Tech Stack
+
+React + TypeScript
+
+Tailwind CSS
+
+shadcn/ui (for Cards, Buttons, Inputs, etc.)
+
+lucide-react (icons)
+
+framer-motion (micro-animations)
+
+If you don’t use shadcn/ui, replace those components (@/components/ui/*) with your own or with basic HTML/Tailwind.
+
+🚀 Getting Started
+1) Scaffold a React + TS app (Vite example)
+npm create vite@latest recipe-gen -- --template react-ts
+cd recipe-gen
+npm install
+
+2) Install dependencies
+npm install framer-motion lucide-react
+# If using shadcn/ui:
+# (In a Next.js/Vite app already configured with Tailwind)
+# Follow shadcn/ui installation to generate components like button, card, input, textarea, label, select, switch, badge
+
+3) Add Tailwind (if you haven’t already)
+
+Follow Tailwind’s official setup for Vite (postcss config, tailwind config, and index.css with the Tailwind directives).
+
+4) Add the App code
+
+Replace your src/App.tsx with the provided App component.
+
+Ensure imports like @/components/ui/button resolve to your shadcn/ui components.
+If your alias isn’t @/, either:
+
+update your bundler/tsconfig path alias, or
+
+change imports to relative paths.
+
+5) Run the app
+npm run dev
+
+
+Open the local URL that Vite prints (typically http://localhost:5173).
+
+🗂️ Project Structure (minimal)
+src/
+  App.tsx           # Main app with generator logic + UI
+  main.tsx          # React mount point
+  index.css         # Tailwind base
+components/ui/      # shadcn/ui components (button, card, input, select, switch, textarea, badge, label)
+
+🧠 How It Works
+Core Types
+
+DietaryTag — union of supported diet tags (vegan, vegetarian, gluten-free, etc.)
+
+Cuisine — a set of cuisines (Italian, Indian, Thai, etc.)
+
+Recipe — normalized structure for generated recipes:
+
+title, description, cuisine, servings, timeMinutes
+
+dietary: DietaryTag[]
+
+ingredients: string[]
+
+steps: string[]
+
+tips?: string[]
+
+caloriesPerServing?: number
+
+Generation Pipeline
+
+Normalize pantry: split by comma/newline → trim → de-dupe
+
+Diet filter: remove entries incompatible with selected dietary tags
+
+Main ingredient: pick a likely “centerpiece” (regex match: chicken/tofu/lentil/etc.)
+
+Flavor accent: sample from FLAVOR_MAP based on cuisine
+
+Style selection: e.g. bowls, curry, stir-fry, tacos
+
+Title template: interpolate ${cuisine}, ${main}, ${accent}
+
+Ingredients: combine sampled pantry with a small “base pantry” (oil, aromatics)
+
+Steps: build a short, realistic sequence (aromatics → protein/veg → body/sauce → balance → serve)
+
+Calories (heuristic): simple word-based scoring to estimate kcal/serving
+
+Tips: sample a few useful cooking tips
+
+All randomness is simple Math.random() sampling for lightweight, deterministic-ish variety.
+
+
+
+
+
+
+This is just a test to really be able to see what the code will look like for the frontend.
